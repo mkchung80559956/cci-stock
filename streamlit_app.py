@@ -4,90 +4,91 @@ import pandas as pd
 import pandas_ta as ta
 
 def get_stock_data(ticker):
-    # 移除使用者可能誤輸入的後綴，由程式統一處理
-    pure_ticker = ticker.split('.')[0]
-    
-    # 嘗試上市代碼
+    pure_ticker = ticker.split('.')[0].strip()
+    # 先試上市 (.TW)
     df = yf.download(f"{pure_ticker}.TW", period="6mo", interval="1d", progress=False)
-    # 如果上市抓不到，嘗試上櫃代碼
+    # 若無數據試上櫃 (.TWO)
     if df.empty or len(df) < 40:
         df = yf.download(f"{pure_ticker}.TWO", period="6mo", interval="1d", progress=False)
     return df
 
-def check_strategy(df, vol_multiplier):
+def analyze_stock(df, vol_multiplier):
     if df.empty or len(df) < 40: 
-        return False, "數據長度不足"
+        return None
     
     try:
-        # 處理多重索引問題 (yfinance 新版特性)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        close_ser = df['Close'].astype(float)
-        high_ser = df['High'].astype(float)
-        low_ser = df['Low'].astype(float)
-        volume_ser = df['Volume'].astype(float)
+        close = df['Close'].astype(float).squeeze()
+        high = df['High'].astype(float).squeeze()
+        low = df['Low'].astype(float).squeeze()
+        volume = df['Volume'].astype(float).squeeze()
 
-        # 指標計算
-        cci = ta.cci(high_ser, low_ser, close_ser, length=39)
-        rsi6 = ta.rsi(close_ser, length=6)
-        rsi14 = ta.rsi(close_ser, length=14)
-        vol_ma5 = volume_ser.rolling(window=5).mean()
+        # 計算指標
+        cci = ta.cci(high, low, close, length=39)
+        rsi6 = ta.rsi(close, length=6)
+        rsi14 = ta.rsi(close, length=14)
+        vol_ma5 = volume.rolling(window=5).mean()
 
-        # 取得數值
-        curr_cci = cci.iloc[-1]
-        prev_cci = cci.iloc[-2]
-        curr_rsi6, prev_rsi6 = rsi6.iloc[-1], rsi6.iloc[-2]
-        curr_rsi14, prev_rsi14 = rsi14.iloc[-1], rsi14.iloc[-2]
-        curr_vol = volume_ser.iloc[-1]
-        avg_vol = vol_ma5.iloc[-1]
+        # 取得最新數值
+        c_cci = cci.iloc[-1]
+        p_cci = cci.iloc[-2]
+        c_rsi6, p_rsi6 = rsi6.iloc[-1], rsi6.iloc[-2]
+        c_rsi14, p_rsi14 = rsi14.iloc[-1], rsi14.iloc[-2]
+        c_vol = volume.iloc[-1]
+        a_vol = vol_ma5.iloc[-1]
 
-        # 策略邏輯
-        cci_ok = prev_cci < 0 and curr_cci > 0
-        rsi_ok = prev_rsi6 < prev_rsi14 and curr_rsi6 > curr_rsi14
-        vol_ok = curr_vol > (avg_vol * vol_multiplier)
+        # 判定條件
+        cond_cci = p_cci < 0 and c_cci > 0
+        cond_rsi = p_rsi6 < p_rsi14 and c_rsi6 > c_rsi14
+        cond_vol = c_vol > (a_vol * vol_multiplier)
 
-        if cci_ok and rsi_ok and vol_ok:
-            return True, "符合條件"
+        status = "🔥 符合" if (cond_cci and cond_rsi and cond_vol) else "未達標"
         
-        # 顯示沒過的原因 (Debug 用)
-        reasons = []
-        if not cci_ok: reasons.append("CCI未突破0")
-        if not rsi_ok: reasons.append("RSI未金叉")
-        if not vol_ok: reasons.append("量能未達標")
-        return False, f"未達標 ({', '.join(reasons)})"
+        return {
+            "收盤價": round(close.iloc[-1], 2),
+            "CCI(39)": round(c_cci, 2),
+            "RSI(6)": round(c_rsi6, 2),
+            "RSI(14)": round(c_rsi14, 2),
+            "成交量比": round(c_vol / a_vol, 2),
+            "狀態": status
+        }
+    except:
+        return None
 
-    except Exception as e:
-        return False, f"計算錯誤: {str(e)}"
-
-# UI 介面
-st.title("🚀 台股量價動能選股器")
+st.title("🚀 台股量價診斷器")
 
 with st.sidebar:
-    st.header("參數調整")
-    vol_ratio = st.slider("成交量爆量倍數 (相較5日均量)", 1.0, 3.0, 1.5, 0.1)
-    stock_input = st.text_area("輸入代碼 (逗號隔開)", "2330, 2317, 2454, 2603, 2303, 2609, 2618")
+    st.header("參數設定")
+    vol_ratio = st.slider("成交量爆量倍數", 0.5, 3.0, 1.0, 0.1)
+    # 加入更多熱門股供測試
+    default_list = "2330, 2317, 2454, 2603, 2303, 2609, 2618, 3231, 2382, 1513"
+    stock_input = st.text_area("輸入代碼 (逗號隔開)", default_list)
 
-if st.button("開始掃描"):
+if st.button("開始診斷"):
     tickers = [s.strip() for s in stock_input.replace("\n", ",").split(",") if s.strip()]
-    results = []
+    all_data = []
     progress_bar = st.progress(0)
     
-    for i, ticker in enumerate(tickers):
-        df = get_stock_data(ticker)
-        if not df.empty:
-            is_match, msg = check_strategy(df, vol_ratio)
-            if is_match:
-                results.append({
-                    "代碼": ticker,
-                    "收盤價": round(float(df['Close'].iloc[-1]), 2),
-                    "成交量": int(df['Volume'].iloc[-1]),
-                    "狀態": "🔥 符合"
-                })
+    for i, t in enumerate(tickers):
+        df = get_stock_data(t)
+        result = analyze_stock(df, vol_ratio)
+        if result:
+            result["代碼"] = t
+            all_data.append(result)
         progress_bar.progress((i + 1) / len(tickers))
     
-    if results:
-        st.success(f"找到 {len(results)} 檔符合條件")
-        st.table(pd.DataFrame(results))
-    else:
-        st.warning("目前清單中沒有股票符合所有條件。您可以嘗試調低左側的『成交量倍數』。")
+    if all_data:
+        res_df = pd.DataFrame(all_data).set_index("代碼")
+        # 顯示所有掃描過的股票，方便查看指標數值
+        st.subheader("全數追蹤清單")
+        st.dataframe(res_df.style.applymap(lambda x: 'color: red' if x == "🔥 符合" else '', subset=['狀態']))
+        
+        # 另外過濾出符合條件的
+        matches = res_df[res_df["狀態"] == "🔥 符合"]
+        if not matches.empty:
+            st.success(f"發現 {len(matches)} 檔符合策略！")
+            st.table(matches)
+        else:
+            st.warning("目前清單中無股票同時滿足：CCI破0、RSI金叉、成交量爆量。")
