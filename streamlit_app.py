@@ -6,8 +6,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="台股動能選股-警示強化版", layout="wide")
+st.set_page_config(page_title="台股動能自動選股器", layout="wide")
 
+# --- 核心分析函數 ---
 def process_stock(ticker, vol_multiplier, cci_len):
     pure_t = ticker.split('.')[0].strip()
     ticker_obj = yf.Ticker(f"{pure_t}.TW")
@@ -25,6 +26,7 @@ def process_stock(ticker, vol_multiplier, cci_len):
     low = df['Low'].ffill().astype(float)
     volume = df['Volume'].ffill().astype(float)
 
+    # 指標計算
     cci = ta.cci(high, low, close, length=cci_len)
     rsi = ta.rsi(close, length=14)
     vol_ma5 = volume.rolling(window=5).mean()
@@ -33,14 +35,14 @@ def process_stock(ticker, vol_multiplier, cci_len):
     c_vol, a_vol = volume.iloc[-1], vol_ma5.iloc[-1]
     c_rsi = rsi.iloc[-1]
 
-    # 1. 趨勢天數
+    # 趨勢天數
     curr_sign = 1 if c_cci >= 0 else -1
     duration = 0
     for i in range(len(cci)-1, -1, -1):
         if (1 if cci.iloc[i] >= 0 else -1) == curr_sign: duration += 1
         else: break
 
-    # 2. 警示標籤邏輯
+    # 警示標籤邏輯
     alert_tag = ""
     is_buy = (p_cci < 0 and c_cci > 0 and c_vol > a_vol * vol_multiplier)
     
@@ -65,47 +67,82 @@ def process_stock(ticker, vol_multiplier, cci_len):
         "raw_cci": cci
     }
 
-# --- UI ---
-st.title("🏹 台股順勢交易：警示標籤強化版")
+# --- UI 介面 ---
+st.title("🚀 台股量價動能選股器 (自動掃描版)")
 
 with st.sidebar:
-    vol_ratio = st.slider("成交量倍數", 0.5, 2.0, 1.1)
+    st.header("⚙️ 模式與參數")
+    scan_mode = st.radio("掃描模式", ["自動掃描熱門股", "自訂代碼輸入"])
+    
+    if scan_mode == "自訂代碼輸入":
+        user_input = st.text_area("代碼 (逗號隔開)", "2330, 2317, 2454, 2603, 2609")
+    else:
+        st.info("💡 將自動掃描台股權值與熱門標的 (共 15 檔)")
+        user_input = "2330, 2317, 2454, 2303, 2603, 2609, 3231, 2382, 1513, 1503, 2618, 2610, 2408, 3037, 3711"
+        
+    vol_ratio = st.slider("成交量爆量倍數", 0.5, 2.5, 1.1)
     cci_p = st.number_input("CCI 週期", 10, 40, 14)
-    user_input = st.text_area("代碼清單", "2330, 2317, 2454, 2603, 2609, 3231, 2382, 1513")
 
-if st.button("🚀 執行智能掃描"):
+if st.button("🔍 執行策略掃描"):
     stocks = [s.strip() for s in user_input.split(",") if s.strip()]
     results = []
     prog = st.progress(0)
+    msg = st.empty()
+    
     for i, t in enumerate(stocks):
+        msg.text(f"正在分析: {t}...")
         res = process_stock(t, vol_ratio, cci_p)
         if res: results.append(res)
         prog.progress((i+1)/len(stocks))
+    
+    msg.empty()
     st.session_state['results'] = results
 
-# --- 顯示區 ---
-if 'results' in st.session_state:
+# --- 顯示與連動 ---
+if 'results' in st.session_state and st.session_state['results']:
     data_list = st.session_state['results']
     df_main = pd.DataFrame(data_list).drop(columns=['raw_df', 'raw_cci'])
     
-    # 樣式定義
-    def highlight_row(row):
-        return ['background-color: #4b0000; color: white' if row['符合買進'] == 'YES' else '' for _ in row]
+    st.subheader("📊 掃描清單 (點選下方任意列即可切換圖表)")
 
-    st.subheader("📊 掃描明細 (點擊列即顯示下方圖表)")
+    # 樣式：符合買進的列背景變深紅
+    def highlight_buy(row):
+        color = 'background-color: #4b0000; color: white' if row['符合買進'] == 'YES' else ''
+        return [color] * len(row)
+
+    # 啟用選擇功能
     event = st.dataframe(
-        df_main.style.apply(highlight_row, axis=1),
-        use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
+        df_main.style.apply(highlight_buy, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row"
     )
 
+    # 預設顯示第一筆，若有選擇則切換
     idx = event.selection.rows[0] if event.selection.rows else 0
     sel = data_list[idx]
 
-    # --- 圖表 ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.6, 0.4])
+    # --- 圖表強化 ---
+    st.divider()
     df_p = sel['raw_df'].tail(60)
-    fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name="K線"), row=1, col=1)
+    
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, 
+                       row_heights=[0.6, 0.4],
+                       subplot_titles=(f"📈 {sel['代碼']} {sel['名稱']} - K線走勢", "🔍 CCI 動能趨勢 (紅色0軸為多空分水嶺)"))
+
+    fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], 
+                               low=df_p['Low'], close=df_p['Close'], name="K線"), row=1, col=1)
+    
     fig.add_trace(go.Scatter(x=df_p.index, y=sel['raw_cci'].tail(60), name="CCI", line=dict(color='orange', width=3)), row=2, col=1)
-    fig.add_hline(y=0, line_dash="dash", line_color="#FF3333", line_width=2, row=2, col=1)
-    fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, title=f"{sel['代碼']} {sel['名稱']} 趨勢診斷")
+    
+    # 強度參考線
+    fig.add_hline(y=0, line_dash="dash", line_color="#FF3333", line_width=2.5, row=2, col=1)
+    fig.add_hline(y=100, line_dash="dot", line_color="rgba(255,255,255,0.2)", row=2, col=1)
+    fig.add_hline(y=-100, line_dash="dot", line_color="rgba(255,255,255,0.2)", row=2, col=1)
+
+    fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
+else:
+    if 'results' in st.session_state:
+        st.info("⚠️ 掃描完成，但沒有符合條件的數據。請嘗試降低「成交量倍數」。")
