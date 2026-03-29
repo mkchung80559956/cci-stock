@@ -6,105 +6,121 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="台股順勢選股分析", layout="wide")
+st.set_page_config(page_title="台股量價趨勢分析", layout="wide")
 
-def get_stock_data(ticker):
-    pure_ticker = ticker.split('.')[0].strip()
-    try:
-        # 增加至 7 個月確保指標暖身充足
-        df = yf.download(f"{pure_ticker}.TW", period="7mo", interval="1d", progress=False)
-        if df.empty or len(df) < 50:
-            df = yf.download(f"{pure_ticker}.TWO", period="7mo", interval="1d", progress=False)
-        return df
-    except:
-        return pd.DataFrame()
-
-def analyze_stock(df, vol_multiplier, cci_len):
-    # 防護機制：確保數據量足夠計算指標 
-    if df is None or df.empty or len(df) < cci_len + 20: 
-        return None
+# 1. 核心數據抓取與分析
+def process_stock(ticker, vol_multiplier, cci_len):
+    pure_t = ticker.split('.')[0].strip()
+    # 嘗試抓取資料
+    df = yf.download(f"{pure_t}.TW", period="7mo", interval="1d", progress=False)
+    if df.empty or len(df) < 50:
+        df = yf.download(f"{pure_t}.TWO", period="7mo", interval="1d", progress=False)
     
-    try:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        
-        close = df['Close'].ffill().astype(float).squeeze()
-        high = df['High'].ffill().astype(float).squeeze()
-        low = df['Low'].ffill().astype(float).squeeze()
-        volume = df['Volume'].ffill().astype(float).squeeze()
+    if df.empty or len(df) < cci_len + 15:
+        return None
 
-        # 計算 CCI 與 RSI
-        cci = ta.cci(high, low, close, length=cci_len)
-        rsi6 = ta.rsi(close, length=6)
-        rsi14 = ta.rsi(close, length=14)
-        
-        if cci is None or len(cci) < 2: return None
+    # 數據處理
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    
+    close = df['Close'].ffill().astype(float).squeeze()
+    high = df['High'].ffill().astype(float).squeeze()
+    low = df['Low'].ffill().astype(float).squeeze()
+    volume = df['Volume'].ffill().astype(float).squeeze()
 
-        vol_ma5 = volume.rolling(window=5).mean()
-        c_cci, p_cci = cci.iloc[-1], cci.iloc[-2]
-        c_vol, a_vol = volume.iloc[-1], vol_ma5.iloc[-1]
+    # 指標計算
+    cci = ta.cci(high, low, close, length=cci_len)
+    vol_ma5 = volume.rolling(window=5).mean()
+    
+    c_cci, p_cci = cci.iloc[-1], cci.iloc[-2]
+    c_vol, a_vol = volume.iloc[-1], vol_ma5.iloc[-1]
 
-        # 趨勢天數計算
-        curr_sign = 1 if c_cci >= 0 else -1
-        duration = 0
-        for i in range(len(cci)-1, -1, -1):
-            if (1 if cci.iloc[i] >= 0 else -1) == curr_sign:
-                duration += 1
-            else:
-                break
+    # 趨勢計算
+    curr_sign = 1 if c_cci >= 0 else -1
+    duration = 0
+    for i in range(len(cci)-1, -1, -1):
+        if (1 if cci.iloc[i] >= 0 else -1) == curr_sign:
+            duration += 1
+        else:
+            break
 
-        status = "🔥 符合買進" if (p_cci < 0 and c_cci > 0 and c_vol > a_vol * vol_multiplier) else "觀察中"
-        
-        return {
-            "日期": df.index[-1].strftime('%Y-%m-%d'),
-            "收盤價": round(close.iloc[-1], 2),
-            "CCI方向": "⬆️ 轉強" if c_cci > p_cci else "⬇️ 轉弱",
-            "CCI數值": round(np.clip(c_cci, -250, 250), 2),
-            "趨勢": f"{'多頭' if curr_sign==1 else '空頭'}({duration}天)",
-            "成交量比": round(c_vol / a_vol, 2),
-            "綜合狀態": status,
-            "df": df, "cci": cci, "rsi6": rsi6, "rsi14": rsi14
-        }
-    except: return None
+    return {
+        "代碼": pure_t,
+        "收盤價": round(close.iloc[-1], 2),
+        "CCI方向": "⬆️ 轉強" if c_cci > p_cci else "⬇️ 轉弱",
+        "CCI數值": round(np.clip(c_cci, -250, 250), 2),
+        "趨勢": f"{'多頭' if curr_sign==1 else '空頭'}({duration}天)",
+        "成交量比": round(c_vol / a_vol, 2),
+        "符合買進": (p_cci < 0 and c_cci > 0 and c_vol > a_vol * vol_multiplier),
+        "raw_df": df,
+        "raw_cci": cci
+    }
 
 # --- UI 介面 ---
 st.title("🏹 台股順勢交易選股器")
 
 with st.sidebar:
     st.header("⚙️ 參數設定")
-    mode = st.radio("模式", ["熱門股", "自訂"])
-    vol_target = st.slider("成交量倍數", 0.5, 2.0, 1.1)
-    cci_window = st.number_input("CCI 週期", 10, 40, 14)
+    mode = st.radio("模式", ["熱門權值股", "自訂代碼"])
+    vol_ratio = st.slider("成交量倍數", 0.5, 2.0, 1.1)
+    cci_p = st.number_input("CCI 週期", 10, 40, 14)
 
-popular_list = ["2330", "2317", "2454", "2603", "2609", "3231", "2382", "1513"]
+stocks_to_scan = ["2330", "2317", "2454", "2603", "2609", "3231", "2382", "1513", "1503", "2303"]
+if mode == "自訂代碼":
+    user_input = st.text_area("輸入代碼 (逗號隔開)", "2330, 2317, 2454")
+    stocks_to_scan = [s.strip() for s in user_input.split(",") if s.strip()]
 
 if st.button("🚀 執行診斷"):
-    tickers = popular_list if mode == "熱門股" else st.text_area("代碼").split(",")
-    results = []
-    for t in tickers:
-        res = analyze_stock(get_stock_data(t.strip()), vol_target, cci_window)
+    all_results = []
+    for t in stocks_to_scan:
+        res = process_stock(t, vol_ratio, cci_p)
         if res:
-            res["代碼"] = t.strip()
-            results.append(res)
-            
-    if results:
-        res_df = pd.DataFrame(results).set_index("代碼")
-        
-        def color_style(val):
-            if val == "⬆️ 轉強": return 'color: red; font-weight: bold'
-            if val == "🔥 符合買進": return 'background-color: #FF4B4B; color: white'
-            return ''
-        
-        st.dataframe(res_df.drop(columns=['df','cci','rsi6','rsi14']).style.applymap(color_style), use_container_width=True)
+            all_results.append(res)
+    
+    if all_results:
+        st.session_state['results'] = all_results
+    else:
+        st.error("找不到數據，請檢查代碼或網路。")
 
-        st.divider()
-        selected_stock = st.selectbox("查看詳細圖表", res_df.index)
-        s_data = res_df.loc[selected_stock]
-        df_p = s_data['df'].tail(60)
-        
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name="K線"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_p.index, y=s_data['cci'].tail(60), name="CCI", line=dict(color='orange')), row=2, col=1)
-        fig.add_hline(y=0, line_dash="dash", line_color="red", row=2, col=1)
-        fig.update_layout(height=600, template="plotly_white", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+# --- 顯示結果與圖表 ---
+if 'results' in st.session_state:
+    data_list = st.session_state['results']
+    df_display = pd.DataFrame(data_list).drop(columns=['raw_df', 'raw_cci'])
+    
+    # 顏色美化
+    def style_df(v):
+        if v == "⬆️ 轉強": return 'color: red; font-weight: bold'
+        if v == True: return 'background-color: #FF4B4B; color: white'
+        return ''
+
+    st.subheader("📊 掃描清單")
+    st.dataframe(df_display.style.applymap(style_df), use_container_width=True)
+
+    st.divider()
+    
+    # 圖表選單
+    target = st.selectbox("🎯 選擇查看詳細趨勢圖", [f"{d['代碼']}" for d in data_list])
+    selected = next(item for item in data_list if item["代碼"] == target)
+    
+    df_p = selected['raw_df'].tail(60)
+    cci_p = selected['raw_cci'].tail(60)
+
+    # 強化圖表設計
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                       vertical_spacing=0.1, row_heights=[0.6, 0.4],
+                       subplot_titles=(f"{target} K線走勢", "CCI 順勢指標 (0軸為強弱分水嶺)"))
+
+    # 1. K線
+    fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], 
+                               low=df_p['Low'], close=df_p['Close'], name="K棒"), row=1, col=1)
+    
+    # 2. CCI 曲線
+    fig.add_trace(go.Scatter(x=df_p.index, y=cci_p, name="CCI", line=dict(color='orange', width=2)), row=2, col=1)
+    
+    # 圖表輔助線 (方向強化)
+    fig.add_hline(y=0, line_dash="dash", line_color="red", line_width=2, row=2, col=1)
+    fig.add_hline(y=100, line_dash="dot", line_color="rgba(255,255,255,0.3)", row=2, col=1)
+    fig.add_hline(y=-100, line_dash="dot", line_color="rgba(255,255,255,0.3)", row=2, col=1)
+
+    fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
